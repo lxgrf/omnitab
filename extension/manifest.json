@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "Omnitab",
+  "version": "0.1.1",
+  "description": "Mirror tabs across all windows to provide a shared workspace viewport (Arc-like).",
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "permissions": [
+    "tabs",
+    "storage",
+    "<all_urls>"
+  ],
+  "browser_action": {
+    "default_title": "Omnitab"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omnitab@local",
+      "strict_min_version": "102.0"
+    }
+  }
+}
