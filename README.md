@@ -9,10 +9,12 @@ Omnitab mirrors tabs across all windows: open a tab in one window and it appears
 
 ## Usage
 
-- Opening a new tab in any window will open the same tab in all other windows.
-- Closing a tab will close its mirrors in other windows.
-- Navigating a tab (URL change) will update its mirrors.
+- Opening a new tab (after first navigating to a site) mirrors to other windows.
+- Closing a tab closes its mirrors in other windows.
+- Navigating a tab (URL change) updates its mirrors.
 - Switching the active tab attempts to focus mirrors in their windows.
+- Pinned tabs are ignored and not mirrored.
+- Container tabs are treated as Spaces: mirrors are created in the same container (space) across windows.
 
 Notes:
 - Firefox API limits may prevent perfect focus behaviour in all cases.
@@ -34,15 +36,15 @@ extension/
 
 A lightweight mapping of logical workspace tabs to per-window tab IDs is kept in `browser.storage.session` to avoid stale data across restarts; it is rebuilt on startup.
 
-## Privacy
+## Privacy & Permissions
 
 - No network requests
 - No analytics
-- Only uses `tabs`, `windows`, `sessions`, and `storage` permissions
+- Permissions used: `tabs`, `storage`, `contextualIdentities`, `<all_urls>`
 
 ## Known limitations
 
-- Pinned tabs may not mirror perfectly due to Firefox rules.
+- Focus mirroring can be flaky in some cases.
 - Private windows are not mirrored by default.
 
 ---

@@ -30,7 +30,7 @@ if (!browser.storage.session) {
 
 // Session storage keys
 const SESSION_KEYS = {
-	workspace: 'workspace', // { logicalId: { url, pinned, perWindow: { [windowId]: tabId } } }
+	workspace: 'workspace', // { logicalId: { url, cookieStoreId, perWindow: { [windowId]: tabId } } }
 	reverseIndex: 'reverseIndex' // { [tabId]: logicalId }
 };
 
@@ -56,6 +56,19 @@ function runWithCreateSuppressed(fn) {
 function isMirrorableUrl(url) {
 	if (!url || typeof url !== 'string') return false;
 	return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function normaliseContainerId(id) {
+	return id || 'firefox-default';
+}
+
+function buildCreateOptions(windowId, url, cookieStoreId) {
+	const opts = { windowId, url, active: false };
+	// Only set cookieStoreId if it is a non-default container
+	if (cookieStoreId && cookieStoreId !== 'firefox-default') {
+		opts.cookieStoreId = cookieStoreId;
+	}
+	return opts;
 }
 
 async function readSession(key) {
@@ -86,16 +99,21 @@ async function listNormalWindows() {
 	return wins.filter(w => !w.incognito);
 }
 
+function tabKey(url, cookieStoreId) {
+	return `${normaliseContainerId(cookieStoreId)}|${url}`;
+}
+
 async function ensureMirrorsForTab(tab) {
 	if (!tab || tab.incognito || tab.windowId === undefined) return;
 	if (tab.pinned) return; // ignore pinned tabs entirely
 	if (!isMirrorableUrl(tab.url)) return;
+	const containerId = normaliseContainerId(tab.cookieStoreId);
 	await withWorkspace(async ({ workspace, reverseIndex }) => {
 		let logicalId = reverseIndex[tab.id];
 		if (!logicalId) {
-			// Try to find an existing logical with same URL
+			// Try to find an existing logical with same URL and container
 			for (const [candidateId, entry] of Object.entries(workspace)) {
-				if (entry.url === tab.url) {
+				if (entry.url === tab.url && entry.cookieStoreId === containerId) {
 					logicalId = candidateId;
 					break;
 				}
@@ -104,7 +122,7 @@ async function ensureMirrorsForTab(tab) {
 				logicalId = generateLogicalId();
 				workspace[logicalId] = {
 					url: tab.url,
-					pinned: false,
+					cookieStoreId: containerId,
 					perWindow: {}
 				};
 			}
@@ -121,11 +139,9 @@ async function ensureMirrorsForTab(tab) {
 			if (!perWindow[win.id]) {
 				await runWithCreateSuppressed(async () => {
 					try {
-						const created = await browser.tabs.create({
-							windowId: win.id,
-							url: workspace[logicalId].url,
-							active: false
-						});
+						const created = await browser.tabs.create(
+							buildCreateOptions(win.id, workspace[logicalId].url, workspace[logicalId].cookieStoreId)
+						);
 						perWindow[win.id] = created.id;
 						reverseIndex[created.id] = logicalId;
 					} catch (e) {
@@ -213,13 +229,14 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 	if (!changeInfo.url) return;
 	if (!isMirrorableUrl(changeInfo.url)) return;
 	if (suppressedUpdatedTabIds.has(tabId)) return;
+	const containerId = normaliseContainerId(tab.cookieStoreId);
 	await withWorkspace(async ({ workspace, reverseIndex }) => {
 		let logicalId = reverseIndex[tabId];
 		// If this tab didn't exist in our mapping (e.g. created as about:newtab), create mapping now
 		if (!logicalId) {
-			// Try to attach to an existing logical entry with same URL
+			// Try to attach to an existing logical entry with same URL + container
 			for (const [candidateId, entry] of Object.entries(workspace)) {
-				if (entry.url === changeInfo.url) {
+				if (entry.url === changeInfo.url && entry.cookieStoreId === containerId) {
 					logicalId = candidateId;
 					break;
 				}
@@ -228,7 +245,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 				logicalId = generateLogicalId();
 				workspace[logicalId] = {
 					url: changeInfo.url,
-					pinned: false,
+					cookieStoreId: containerId,
 					perWindow: {}
 				};
 			}
@@ -254,8 +271,8 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 		}
 		return { workspace, reverseIndex };
 	});
-	// Ensure mirrors exist in other windows after first navigation
-	await ensureMirrorsForTab(tab);
+	// Ensure mirrors exist in other windows after first navigation (use updated URL)
+	await ensureMirrorsForTab({ ...tab, url: changeInfo.url });
 });
 
 // Event: tab moved (index change) - try to mirror order
@@ -309,11 +326,9 @@ browser.windows.onCreated.addListener(async (window) => {
 			if (!isMirrorableUrl(entry.url)) continue;
 			await runWithCreateSuppressed(async () => {
 				try {
-					const created = await browser.tabs.create({
-						windowId: window.id,
-						url: entry.url,
-						active: false
-					});
+					const created = await browser.tabs.create(
+						buildCreateOptions(window.id, entry.url, entry.cookieStoreId)
+					);
 					entry.perWindow[window.id] = created.id;
 					reverseIndex[created.id] = logicalId;
 				} catch (_) {}
@@ -337,28 +352,28 @@ browser.windows.onRemoved.addListener(async (windowId) => {
 	});
 });
 
-// On startup: build workspace from existing windows/tabs (dedupe by URL)
+// On startup: build workspace from existing windows/tabs (dedupe by URL + container)
 async function initialiseFromExisting() {
 	await writeSession(SESSION_KEYS.workspace, {});
 	await writeSession(SESSION_KEYS.reverseIndex, {});
 	const windows = await listNormalWindows();
 	const workspace = {};
 	const reverseIndex = {};
-	const byKey = new Map(); // url -> logicalId
+	const byKey = new Map(); // `${cookieStoreId}|${url}` -> logicalId
 	for (const win of windows) {
 		const tabs = await browser.tabs.query({ windowId: win.id });
 		for (const tab of tabs) {
 			if (tab.incognito) continue;
 			if (tab.pinned) continue;
 			if (!isMirrorableUrl(tab.url)) continue;
-			const key = tab.url;
+			const key = tabKey(tab.url, tab.cookieStoreId);
 			let logicalId = byKey.get(key);
 			if (!logicalId) {
 				logicalId = generateLogicalId();
 				byKey.set(key, logicalId);
 				workspace[logicalId] = {
 					url: tab.url,
-					pinned: false,
+					cookieStoreId: normaliseContainerId(tab.cookieStoreId),
 					perWindow: {}
 				};
 			}
@@ -376,11 +391,9 @@ async function initialiseFromExisting() {
 			if (!entry.perWindow[win.id]) {
 				await runWithCreateSuppressed(async () => {
 					try {
-						const created = await browser.tabs.create({
-							windowId: win.id,
-							url: entry.url,
-							active: false
-						});
+						const created = await browser.tabs.create(
+							buildCreateOptions(win.id, entry.url, entry.cookieStoreId)
+						);
 						entry.perWindow[win.id] = created.id;
 						reverseIndex[created.id] = logicalId;
 						await writeSession(SESSION_KEYS.reverseIndex, reverseIndex);
